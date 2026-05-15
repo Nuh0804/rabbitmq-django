@@ -2,7 +2,7 @@ import graphene
 from .dtos.inventoryDtos import *
 from .dtos.ResponseDtos import ResponseObject, PageObject
 from .models import Product, StockLevel, StockReservation
-from .builder import _product_to_object, _reservation_to_object
+from .builder import InventoryBuilder
 from django.db.models import Q
 from django.core.paginator import Paginator
 
@@ -19,7 +19,7 @@ class Query(graphene.ObjectType):
             product = Product.objects.select_related("stock").get(sku=sku)
             return ProductResponseObject(
                 response=ResponseObject.get_response(id="1"),
-                data=_product_to_object(product),
+                data=InventoryBuilder._product_to_object(product),
             )
         except Product.DoesNotExist:
             return ProductResponseObject(response=ResponseObject.get_response(id="11"), data=None)
@@ -49,7 +49,7 @@ class Query(graphene.ObjectType):
             required_page = paginated.page(page_number)
             page_object   = PageObject.get_page(required_page)
 
-            data = [_product_to_object(p) for p in required_page]
+            data = [InventoryBuilder._product_to_object(p) for p in required_page]
 
             return ProductListResponseObject(
                 response=ResponseObject.get_response(id="1"),
@@ -85,7 +85,7 @@ class Query(graphene.ObjectType):
             reservation = StockReservation.objects.prefetch_related("items").get(order_id=order_id)
             return ReservationResponseObject(
                 response=ResponseObject.get_response(id="1"),
-                data=_reservation_to_object(reservation),
+                data=InventoryBuilder._reservation_to_object(reservation),
             )
         except StockReservation.DoesNotExist:
             return ReservationResponseObject(response=ResponseObject.get_response(id="11"), data=None)
@@ -113,7 +113,7 @@ class Query(graphene.ObjectType):
             required_page = paginated.page(page_number)
             page_object   = PageObject.get_page(required_page)
 
-            data = [_reservation_to_object(r) for r in required_page]
+            data = [InventoryBuilder._reservation_to_object(r) for r in required_page]
 
             return ReservationListResponseObject(
                 response=ResponseObject.get_response(id="1"),

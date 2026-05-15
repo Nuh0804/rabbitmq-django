@@ -1,6 +1,6 @@
 import graphene
 from .models import Order
-from .builder import _order_to_object, _get_user_id
+from .builder import OrderBuilder
 from .dtos.ResponseDtos import ResponseObject, PageObject
 from .dtos.OrderDto import OrderResponseObject, OrderListResponseObject, OrderFilteringInputObject
 from django.db.models import Q
@@ -13,7 +13,7 @@ class Query(graphene.ObjectType):
     get_my_orders = graphene.Field(OrderListResponseObject, filtering=OrderFilteringInputObject(required=False))
 
     def resolve_get_order(self, info, order_id):
-        user_id = _get_user_id(info)
+        user_id = OrderBuilder._get_user_id(info)
         try:
             order = Order.objects.prefetch_related("items").select_related("shipping_address").get(
                 id=order_id,
@@ -21,7 +21,7 @@ class Query(graphene.ObjectType):
             )
             return OrderResponseObject(
                 response=ResponseObject.get_response(id="1"),
-                data=_order_to_object(order),
+                data=OrderBuilder._order_to_object(order),
             )
         except Order.DoesNotExist:
             return OrderResponseObject(
@@ -55,7 +55,7 @@ class Query(graphene.ObjectType):
             required_page = paginated.page(page_number)
             page_object   = PageObject.get_page(required_page)
 
-            data = [_order_to_object(o) for o in required_page]
+            data = [OrderBuilder._order_to_object(o) for o in required_page]
 
             return OrderListResponseObject(
                 response=ResponseObject.get_response(id="1"),
@@ -68,7 +68,7 @@ class Query(graphene.ObjectType):
 
     def resolve_get_my_orders(self, info, filtering=None):
         """Orders belonging to the authenticated user."""
-        user_id = _get_user_id(info)
+        user_id = OrderBuilder._get_user_id(info)
         if not user_id:
             return OrderListResponseObject(
                 response=ResponseObject.get_response(id="10"),
@@ -95,7 +95,7 @@ class Query(graphene.ObjectType):
             required_page = paginated.page(page_number)
             page_object   = PageObject.get_page(required_page)
 
-            data = [_order_to_object(o) for o in required_page]
+            data = [OrderBuilder._order_to_object(o) for o in required_page]
 
             return OrderListResponseObject(
                 response=ResponseObject.get_response(id="1"),

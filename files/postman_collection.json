@@ -1,0 +1,843 @@
+{
+  "info": {
+    "name": "RabbitMQ E-Commerce Project",
+    "description": "Full test suite for the RabbitMQ e-commerce microservices project.\nCovers all test cases: happy path, failure paths, retries, DLQ, idempotency,\nservice-down scenarios, and data consistency checks.\n\nVariables (set in Postman Environment):\n  BASE_ORDER    = http://localhost:8001\n  BASE_PAYMENT  = http://localhost:8002\n  BASE_INVENTORY= http://localhost:8003\n  BASE_SHIPPING = http://localhost:8005\n  BASE_NOTIFY   = http://localhost:8004\n  order_id      = (set automatically by tests)\n  payment_id    = (set automatically by tests)",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    { "key": "BASE_ORDER",     "value": "http://localhost:8001" },
+    { "key": "BASE_PAYMENT",   "value": "http://localhost:8002" },
+    { "key": "BASE_INVENTORY", "value": "http://localhost:8003" },
+    { "key": "BASE_SHIPPING",  "value": "http://localhost:8005" },
+    { "key": "BASE_NOTIFY",    "value": "http://localhost:8004" }
+  ],
+  "item": [
+
+    {
+      "name": "1. Happy Path — Full Order Flow",
+      "description": "ORD-05: Verifies full status lifecycle. Run requests in sequence. After each step wait 1-2s then poll the order status endpoint.",
+      "item": [
+        {
+          "name": "1.1 Create Order (triggers order.created)",
+          "request": {
+            "method": "POST",
+            "url": "{{BASE_ORDER}}/api/orders/",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"user_id\": \"user-001\",\n  \"items\": [\n    { \"sku\": \"SHOE-RED-42\", \"quantity\": 2, \"unit_price\": 75000 }\n  ],\n  \"currency\": \"TZS\",\n  \"card_number\": \"4111111111110\",\n  \"shipping_address\": {\n    \"street\": \"Samora Avenue 12\",\n    \"city\": \"Dar es Salaam\",\n    \"country\": \"TZ\",\n    \"recipient_name\": \"Nuh Test\",\n    \"_sim_scenario\": \"success\"\n  }\n}"
+            }
+          },
+          "event": [{
+            "listen": "test",
+            "script": {
+              "exec": [
+                "pm.test('Status 201 Created', () => pm.response.to.have.status(201));",
+                "const body = pm.response.json();",
+                "pm.test('order_id present', () => pm.expect(body.order_id).to.be.a('string'));",
+                "pm.test('initial status is pending', () => pm.expect(body.status).to.equal('pending'));",
+                "pm.collectionVariables.set('order_id', body.order_id);",
+                "console.log('order_id saved:', body.order_id);"
+              ]
+            }
+          }]
+        },
+        {
+          "name": "1.2 Poll Order Status — expect payment_processing or paid",
+          "request": {
+            "method": "GET",
+            "url": "{{BASE_ORDER}}/api/orders/{{order_id}}/"
+          },
+          "event": [{
+            "listen": "test",
+            "script": {
+              "exec": [
+                "pm.test('Status 200', () => pm.response.to.have.status(200));",
+                "const body = pm.response.json();",
+                "pm.test('Status advanced past pending', () => {",
+                "  pm.expect(['payment_processing','paid','fulfilling','shipped'])",
+                "    .to.include(body.status);",
+                "});",
+                "console.log('Current order status:', body.status);"
+              ]
+            }
+          }]
+        },
+        {
+          "name": "1.3 Poll Order Status — expect paid",
+          "request": {
+            "method": "GET",
+            "url": "{{BASE_ORDER}}/api/orders/{{order_id}}/"
+          },
+          "event": [{
+            "listen": "test",
+            "script": {
+              "exec": [
+                "const body = pm.response.json();",
+                "pm.test('Order reached paid or further', () => {",
+                "  pm.expect(['paid','fulfilling','shipped']).to.include(body.status);",
+                "});",
+                "pm.test('No error_message on successful order', () => {",
+                "  pm.expect(body.error_message).to.be.null;",
+                "});"
+              ]
+            }
+          }]
+        },
+        {
+          "name": "1.4 Check Notification sent (dedup test)",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{BASE_NOTIFY}}/api/notifications/?order_id={{order_id}}&event_type=payment.succeeded",
+              "query": [
+                { "key": "order_id",   "value": "{{order_id}}" },
+                { "key": "event_type", "value": "payment.succeeded" }
+              ]
+            }
+          },
+          "event": [{
+            "listen": "test",
+            "script": {
+              "exec": [
+                "pm.test('Exactly one payment.succeeded email sent', () => {",
+                "  const body = pm.response.json();",
+                "  const emails = body.results.filter(n => n.channel === 'email');",
+                "  pm.expect(emails.length).to.equal(1);",
+                "});"
+              ]
+            }
+          }]
+        },
+        {
+          "name": "1.5 Check Inventory reserved",
+          "request": {
+            "method": "GET",
+            "url": "{{BASE_INVENTORY}}/api/reservations/{{order_id}}/"
+          },
+          "event": [{
+            "listen": "test",
+            "script": {
+              "exec": [
+                "pm.test('Stock reservation exists', () => pm.response.to.have.status(200));",
+                "const body = pm.response.json();",
+                "pm.test('Reservation status is reserved or dispatched', () => {",
+                "  pm.expect(['reserved','dispatched']).to.include(body.status);",
+                "});"
+              ]
+            }
+          }]
+        }
+      ]
+    },
+
+    {
+      "name": "2. Idempotency Tests",
+      "item": [
+        {
+          "name": "ORD-01: Double order submission (expect 409)",
+          "request": {
+            "method": "POST",
+            "url": "{{BASE_ORDER}}/api/orders/",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"user_id\": \"user-idem-001\",\n  \"items\": [{ \"sku\": \"BOOK-001\", \"quantity\": 1, \"unit_price\": 25000 }],\n  \"currency\": \"TZS\",\n  \"card_number\": \"4111111111110\",\n  \"idempotency_key\": \"idem-test-key-001\",\n  \"shipping_address\": { \"street\": \"Uhuru St\", \"city\": \"Dar es Salaam\", \"country\": \"TZ\" }\n}"
+            }
+          },
+          "event": [{
+            "listen": "test",
+            "script": {
+              "exec": [
+                "// First call — save order_id",
+                "if (pm.response.code === 201) {",
+                "  pm.collectionVariables.set('idem_order_id', pm.response.json().order_id);",
+                "  pm.test('First call created order', () => pm.response.to.have.status(201));",
+                "} else {",
+                "  // Second call with same idempotency_key should return 409",
+                "  pm.test('Second call returns 409', () => pm.response.to.have.status(409));",
+                "  const body = pm.response.json();",
+                "  pm.test('Returns existing order_id', () => {",
+                "    pm.expect(body.order_id).to.equal(pm.collectionVariables.get('idem_order_id'));",
+                "  });",
+                "}"
+              ]
+            }
+          }]
+        },
+        {
+          "name": "ORD-01: Send SAME request again (expect 409 with same order_id)",
+          "request": {
+            "method": "POST",
+            "url": "{{BASE_ORDER}}/api/orders/",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"user_id\": \"user-idem-001\",\n  \"items\": [{ \"sku\": \"BOOK-001\", \"quantity\": 1, \"unit_price\": 25000 }],\n  \"currency\": \"TZS\",\n  \"card_number\": \"4111111111110\",\n  \"idempotency_key\": \"idem-test-key-001\",\n  \"shipping_address\": { \"street\": \"Uhuru St\", \"city\": \"Dar es Salaam\", \"country\": \"TZ\" }\n}"
+            }
+          },
+          "event": [{
+            "listen": "test",
+            "script": {
+              "exec": [
+                "pm.test('Returns 409 on duplicate', () => pm.response.to.have.status(409));",
+                "const body = pm.response.json();",
+                "pm.test('Returns same order_id as first call', () => {",
+                "  pm.expect(body.order_id).to.equal(pm.collectionVariables.get('idem_order_id'));",
+                "});",
+                "pm.test('No new order created', () => {",
+                "  pm.expect(body.duplicate).to.be.true;",
+                "});"
+              ]
+            }
+          }]
+        },
+        {
+          "name": "NOTIF-03: Check exactly one email sent for order (no duplicates)",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{BASE_NOTIFY}}/api/notifications/?order_id={{idem_order_id}}&channel=email",
+              "query": [
+                { "key": "order_id", "value": "{{idem_order_id}}" },
+                { "key": "channel",  "value": "email" }
+              ]
+            }
+          },
+          "event": [{
+            "listen": "test",
+            "script": {
+              "exec": [
+                "pm.test('Status 200', () => pm.response.to.have.status(200));",
+                "const body = pm.response.json();",
+                "pm.test('Exactly one email sent despite duplicate order submission', () => {",
+                "  pm.expect(body.count).to.equal(1);",
+                "});"
+              ]
+            }
+          }]
+        }
+      ]
+    },
+
+    {
+      "name": "3. Payment Failure Paths",
+      "item": [
+        {
+          "name": "PAY-03: Card declined — order should become payment_failed",
+          "request": {
+            "method": "POST",
+            "url": "{{BASE_ORDER}}/api/orders/",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"user_id\": \"user-fail-001\",\n  \"items\": [{ \"sku\": \"HAT-001\", \"quantity\": 1, \"unit_price\": 15000 }],\n  \"currency\": \"TZS\",\n  \"card_number\": \"4111111111111\",\n  \"shipping_address\": { \"street\": \"Kariakoo\", \"city\": \"Dar es Salaam\", \"country\": \"TZ\" }\n}"
+            }
+          },
+          "event": [{
+            "listen": "test",
+            "script": {
+              "exec": [
+                "pm.test('Order created (201)', () => pm.response.to.have.status(201));",
+                "pm.collectionVariables.set('declined_order_id', pm.response.json().order_id);"
+              ]
+            }
+          }]
+        },
+        {
+          "name": "PAY-03: Poll — expect payment_failed status",
+          "request": {
+            "method": "GET",
+            "url": "{{BASE_ORDER}}/api/orders/{{declined_order_id}}/"
+          },
+          "event": [{
+            "listen": "test",
+            "script": {
+              "exec": [
+                "const body = pm.response.json();",
+                "pm.test('Order status is payment_failed', () => {",
+                "  pm.expect(body.status).to.equal('payment_failed');",
+                "});",
+                "pm.test('Error code is declined', () => {",
+                "  pm.expect(body.error_code).to.equal('declined');",
+                "});",
+                "pm.test('No stock reserved for declined order', () => {",
+                "  pm.expect(body.inventory_reserved).to.be.false;",
+                "});"
+              ]
+            }
+          }]
+        },
+        {
+          "name": "PAY-03: Verify inventory NOT touched after decline",
+          "request": {
+            "method": "GET",
+            "url": "{{BASE_INVENTORY}}/api/reservations/{{declined_order_id}}/"
+          },
+          "event": [{
+            "listen": "test",
+            "script": {
+              "exec": [
+                "pm.test('No reservation exists for declined order', () => {",
+                "  pm.expect([404, 200]).to.include(pm.response.code);",
+                "  if (pm.response.code === 200) {",
+                "    pm.expect(pm.response.json().status).to.not.equal('reserved');",
+                "  }",
+                "});"
+              ]
+            }
+          }]
+        },
+        {
+          "name": "PAY-05: Timeout card — check DLQ after 3 retries",
+          "request": {
+            "method": "POST",
+            "url": "{{BASE_ORDER}}/api/orders/",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"user_id\": \"user-timeout-001\",\n  \"items\": [{ \"sku\": \"BAG-001\", \"quantity\": 1, \"unit_price\": 45000 }],\n  \"currency\": \"TZS\",\n  \"card_number\": \"4111111111113\",\n  \"shipping_address\": { \"street\": \"Msasani\", \"city\": \"Dar es Salaam\", \"country\": \"TZ\" }\n}"
+            }
+          },
+          "event": [{
+            "listen": "test",
+            "script": {
+              "exec": [
+                "pm.test('Order created', () => pm.response.to.have.status(201));",
+                "pm.collectionVariables.set('timeout_order_id', pm.response.json().order_id);",
+                "console.log('Wait ~90s for 3 retries to exhaust before checking DLQ');"
+              ]
+            }
+          }]
+        },
+        {
+          "name": "PAY-05: Check DLQ has the timed-out message (run after ~90s)",
+          "request": {
+            "method": "GET",
+            "url": "{{BASE_PAYMENT}}/api/debug/dlq/payment.dlq/"
+          },
+          "event": [{
+            "listen": "test",
+            "script": {
+              "exec": [
+                "pm.test('DLQ has at least one message', () => {",
+                "  const body = pm.response.json();",
+                "  pm.expect(body.message_count).to.be.greaterThan(0);",
+                "});",
+                "const body = pm.response.json();",
+                "const ourMsg = body.messages.find(m => m.order_id === pm.collectionVariables.get('timeout_order_id'));",
+                "pm.test('Our timed-out order is in the DLQ', () => {",
+                "  pm.expect(ourMsg).to.not.be.undefined;",
+                "});",
+                "pm.test('Death reason is timeout or rejected', () => {",
+                "  pm.expect(['timeout','rejected']).to.include(ourMsg.death_reason);",
+                "});"
+              ]
+            }
+          }]
+        },
+        {
+          "name": "PAY-09: Replay DLQ message after fixing root cause",
+          "request": {
+            "method": "POST",
+            "url": "{{BASE_PAYMENT}}/api/debug/dlq/payment.dlq/replay/",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{ \"order_id\": \"{{timeout_order_id}}\" }"
+            }
+          },
+          "event": [{
+            "listen": "test",
+            "script": {
+              "exec": [
+                "pm.test('Replay accepted (202)', () => pm.response.to.have.status(202));",
+                "const body = pm.response.json();",
+                "pm.test('Message requeued', () => pm.expect(body.requeued).to.be.true);"
+              ]
+            }
+          }]
+        }
+      ]
+    },
+
+    {
+      "name": "4. Validation Tests",
+      "item": [
+        {
+          "name": "ORD-03: Empty items array (expect 422)",
+          "request": {
+            "method": "POST",
+            "url": "{{BASE_ORDER}}/api/orders/",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"user_id\": \"user-val-001\",\n  \"items\": [],\n  \"currency\": \"TZS\",\n  \"card_number\": \"4111111111110\",\n  \"shipping_address\": { \"street\": \"Test St\", \"city\": \"Dar es Salaam\", \"country\": \"TZ\" }\n}"
+            }
+          },
+          "event": [{
+            "listen": "test",
+            "script": {
+              "exec": [
+                "pm.test('Returns 422 Unprocessable Entity', () => pm.response.to.have.status(422));",
+                "const body = pm.response.json();",
+                "pm.test('Error mentions items field', () => {",
+                "  pm.expect(JSON.stringify(body)).to.include('items');",
+                "});",
+                "pm.test('No order created in DB', () => {",
+                "  pm.expect(body.order_id).to.be.undefined;",
+                "});"
+              ]
+            }
+          }]
+        },
+        {
+          "name": "ORD-06: Order for out-of-stock item (expect 400)",
+          "request": {
+            "method": "POST",
+            "url": "{{BASE_ORDER}}/api/orders/",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"user_id\": \"user-val-002\",\n  \"items\": [{ \"sku\": \"OUT-OF-STOCK-SKU\", \"quantity\": 999, \"unit_price\": 10000 }],\n  \"currency\": \"TZS\",\n  \"card_number\": \"4111111111110\",\n  \"shipping_address\": { \"street\": \"Test St\", \"city\": \"Dar es Salaam\", \"country\": \"TZ\", \"_sim_scenario\": \"out_of_stock\" }\n}"
+            }
+          },
+          "event": [{
+            "listen": "test",
+            "script": {
+              "exec": [
+                "pm.test('Returns 400 Bad Request', () => pm.response.to.have.status(400));",
+                "pm.test('Error mentions stock', () => {",
+                "  pm.expect(JSON.stringify(pm.response.json())).to.match(/stock|inventory/i);",
+                "});"
+              ]
+            }
+          }]
+        },
+        {
+          "name": "SEC-02: SQL injection in order_id field",
+          "request": {
+            "method": "GET",
+            "url": "{{BASE_ORDER}}/api/orders/1;DROP TABLE orders;--/"
+          },
+          "event": [{
+            "listen": "test",
+            "script": {
+              "exec": [
+                "pm.test('Returns 404 or 400, never 500', () => {",
+                "  pm.expect([400, 404]).to.include(pm.response.code);",
+                "});",
+                "pm.test('No stack trace exposed in response', () => {",
+                "  pm.expect(pm.response.text()).to.not.match(/Traceback|django|sql/i);",
+                "});"
+              ]
+            }
+          }]
+        },
+        {
+          "name": "PAY-06: Zero amount order",
+          "request": {
+            "method": "POST",
+            "url": "{{BASE_ORDER}}/api/orders/",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"user_id\": \"user-zero-001\",\n  \"items\": [{ \"sku\": \"FREE-ITEM\", \"quantity\": 1, \"unit_price\": 0 }],\n  \"currency\": \"TZS\",\n  \"card_number\": \"4111111111110\",\n  \"shipping_address\": { \"street\": \"Test St\", \"city\": \"Dar es Salaam\", \"country\": \"TZ\" }\n}"
+            }
+          },
+          "event": [{
+            "listen": "test",
+            "script": {
+              "exec": [
+                "pm.test('Zero amount order rejected with 400 or 422', () => {",
+                "  pm.expect([400, 422]).to.include(pm.response.code);",
+                "});"
+              ]
+            }
+          }]
+        }
+      ]
+    },
+
+    {
+      "name": "5. Order Cancellation & Compensation",
+      "item": [
+        {
+          "name": "ORD-04: Create order then immediately cancel",
+          "request": {
+            "method": "POST",
+            "url": "{{BASE_ORDER}}/api/orders/",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"user_id\": \"user-cancel-001\",\n  \"items\": [{ \"sku\": \"SHIRT-M\", \"quantity\": 1, \"unit_price\": 35000 }],\n  \"currency\": \"TZS\",\n  \"card_number\": \"4111111111110\",\n  \"shipping_address\": { \"street\": \"Posta\", \"city\": \"Dar es Salaam\", \"country\": \"TZ\" }\n}"
+            }
+          },
+          "event": [{
+            "listen": "test",
+            "script": {
+              "exec": [
+                "pm.test('Order created', () => pm.response.to.have.status(201));",
+                "pm.collectionVariables.set('cancel_order_id', pm.response.json().order_id);"
+              ]
+            }
+          }]
+        },
+        {
+          "name": "ORD-04: Cancel the order immediately",
+          "request": {
+            "method": "DELETE",
+            "url": "{{BASE_ORDER}}/api/orders/{{cancel_order_id}}/"
+          },
+          "event": [{
+            "listen": "test",
+            "script": {
+              "exec": [
+                "pm.test('Cancel accepted (200 or 202)', () => {",
+                "  pm.expect([200, 202]).to.include(pm.response.code);",
+                "});"
+              ]
+            }
+          }]
+        },
+        {
+          "name": "ORD-04: Poll — order should be cancelled, not paid",
+          "request": {
+            "method": "GET",
+            "url": "{{BASE_ORDER}}/api/orders/{{cancel_order_id}}/"
+          },
+          "event": [{
+            "listen": "test",
+            "script": {
+              "exec": [
+                "const body = pm.response.json();",
+                "pm.test('Order status is cancelled', () => {",
+                "  pm.expect(body.status).to.equal('cancelled');",
+                "});",
+                "pm.test('No charge on cancelled order', () => {",
+                "  pm.expect(body.amount_charged).to.be.null;",
+                "});"
+              ]
+            }
+          }]
+        },
+        {
+          "name": "PAY-08: Refund after successful payment",
+          "request": {
+            "method": "POST",
+            "url": "{{BASE_ORDER}}/api/orders/{{order_id}}/refund/",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{ \"reason\": \"customer_request\" }"
+            }
+          },
+          "event": [{
+            "listen": "test",
+            "script": {
+              "exec": [
+                "pm.test('Refund accepted (200 or 202)', () => {",
+                "  pm.expect([200, 202]).to.include(pm.response.code);",
+                "});",
+                "const body = pm.response.json();",
+                "pm.test('Refund ID present', () => pm.expect(body.refund_id).to.be.a('string'));"
+              ]
+            }
+          }]
+        }
+      ]
+    },
+
+    {
+      "name": "6. Service-Down Scenarios",
+      "description": "MANUAL STEPS REQUIRED: Stop/start Docker containers as instructed in each request description before sending.",
+      "item": [
+        {
+          "name": "PAY-04: [STEP 1] Stop Payment Service container first, then create order",
+          "request": {
+            "method": "POST",
+            "url": "{{BASE_ORDER}}/api/orders/",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"user_id\": \"user-svcdown-001\",\n  \"items\": [{ \"sku\": \"LAPTOP-001\", \"quantity\": 1, \"unit_price\": 1200000 }],\n  \"currency\": \"TZS\",\n  \"card_number\": \"4111111111110\",\n  \"shipping_address\": { \"street\": \"Oyster Bay\", \"city\": \"Dar es Salaam\", \"country\": \"TZ\" }\n}"
+            }
+          },
+          "event": [{
+            "listen": "prerequest",
+            "script": {
+              "exec": [
+                "console.log('=== MANUAL STEP ===');",
+                "console.log('Run: docker stop payment_service');",
+                "console.log('Then send this request.');",
+                "console.log('The order.created message will sit in the queue.');"
+              ]
+            }
+          }],
+          "event2": [{
+            "listen": "test",
+            "script": {
+              "exec": [
+                "pm.test('Order still created despite payment service being down', () => {",
+                "  pm.response.to.have.status(201);",
+                "});",
+                "pm.collectionVariables.set('svcdown_order_id', pm.response.json().order_id);"
+              ]
+            }
+          }]
+        },
+        {
+          "name": "PAY-04: [STEP 2] Check order still pending (payment not processed yet)",
+          "request": {
+            "method": "GET",
+            "url": "{{BASE_ORDER}}/api/orders/{{svcdown_order_id}}/"
+          },
+          "event": [{
+            "listen": "test",
+            "script": {
+              "exec": [
+                "const body = pm.response.json();",
+                "pm.test('Order is still pending (payment service is down)', () => {",
+                "  pm.expect(body.status).to.equal('pending');",
+                "});"
+              ]
+            }
+          }]
+        },
+        {
+          "name": "PAY-04: [STEP 3] Restart Payment Service, then poll for completion",
+          "request": {
+            "method": "GET",
+            "url": "{{BASE_ORDER}}/api/orders/{{svcdown_order_id}}/"
+          },
+          "event": [{
+            "listen": "prerequest",
+            "script": {
+              "exec": [
+                "console.log('=== MANUAL STEP ===');",
+                "console.log('Run: docker start payment_service');",
+                "console.log('Wait 5s, then send this request.');",
+                "console.log('Payment service should pick up the queued message.');"
+              ]
+            }
+          }],
+          "event2": [{
+            "listen": "test",
+            "script": {
+              "exec": [
+                "const body = pm.response.json();",
+                "pm.test('Order completed after payment service restarted', () => {",
+                "  pm.expect(['paid','fulfilling','shipped']).to.include(body.status);",
+                "});",
+                "pm.test('No message lost during service downtime', () => {",
+                "  pm.expect(body.payment_intent_id).to.be.a('string');",
+                "});"
+              ]
+            }
+          }]
+        }
+      ]
+    },
+
+    {
+      "name": "7. Broker & Infrastructure",
+      "item": [
+        {
+          "name": "BROKER-02: Verify all critical queues use persistent messages",
+          "request": {
+            "method": "GET",
+            "url": "{{BASE_ORDER}}/api/debug/queues/"
+          },
+          "event": [{
+            "listen": "test",
+            "script": {
+              "exec": [
+                "pm.test('Status 200', () => pm.response.to.have.status(200));",
+                "const body = pm.response.json();",
+                "const critical = ['payment.queue','inventory.queue','shipping.queue'];",
+                "critical.forEach(q => {",
+                "  const queue = body.queues.find(x => x.name === q);",
+                "  pm.test(`${q} exists and is durable`, () => {",
+                "    pm.expect(queue).to.not.be.undefined;",
+                "    pm.expect(queue.durable).to.be.true;",
+                "  });",
+                "  pm.test(`${q} uses persistent delivery mode`, () => {",
+                "    pm.expect(queue.message_stats?.delivery_mode).to.equal(2);",
+                "  });",
+                "});"
+              ]
+            }
+          }]
+        },
+        {
+          "name": "BROKER-06: Verify prefetch_count set on all consumers",
+          "request": {
+            "method": "GET",
+            "url": "{{BASE_ORDER}}/api/debug/queues/"
+          },
+          "event": [{
+            "listen": "test",
+            "script": {
+              "exec": [
+                "const body = pm.response.json();",
+                "body.queues.forEach(q => {",
+                "  q.consumer_details?.forEach(c => {",
+                "    pm.test(`Consumer on ${q.name} has prefetch_count=1`, () => {",
+                "      pm.expect(c.prefetch_count).to.equal(1);",
+                "    });",
+                "  });",
+                "});"
+              ]
+            }
+          }]
+        },
+        {
+          "name": "BROKER-04: DLQ must have a monitoring consumer",
+          "request": {
+            "method": "GET",
+            "url": "{{BASE_PAYMENT}}/api/debug/dlq/payment.dlq/"
+          },
+          "event": [{
+            "listen": "test",
+            "script": {
+              "exec": [
+                "pm.test('DLQ endpoint accessible', () => pm.response.to.have.status(200));",
+                "const body = pm.response.json();",
+                "pm.test('DLQ has at least one consumer (monitoring)', () => {",
+                "  pm.expect(body.consumer_count).to.be.greaterThan(0);",
+                "});"
+              ]
+            }
+          }]
+        }
+      ]
+    },
+
+    {
+      "name": "8. Observability",
+      "item": [
+        {
+          "name": "OPS-01: Health check — all services",
+          "request": {
+            "method": "GET",
+            "url": "{{BASE_ORDER}}/api/health/"
+          },
+          "event": [{
+            "listen": "test",
+            "script": {
+              "exec": [
+                "pm.test('Health endpoint returns 200', () => pm.response.to.have.status(200));",
+                "const body = pm.response.json();",
+                "pm.test('DB connection healthy', () => pm.expect(body.db).to.equal('ok'));",
+                "pm.test('RabbitMQ connection healthy', () => pm.expect(body.rabbitmq).to.equal('ok'));",
+                "pm.test('last_processed_at present', () => pm.expect(body.last_processed_at).to.be.a('string'));",
+                "pm.test('consumer_lag reported', () => pm.expect(body.consumer_lag).to.be.a('number'));"
+              ]
+            }
+          }]
+        },
+        {
+          "name": "OPS-02: Correlation ID propagated across services",
+          "request": {
+            "method": "POST",
+            "url": "{{BASE_ORDER}}/api/orders/",
+            "header": [
+              { "key": "Content-Type",    "value": "application/json" },
+              { "key": "X-Correlation-ID","value": "test-correlation-abc123" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"user_id\": \"user-trace-001\",\n  \"items\": [{ \"sku\": \"PEN-001\", \"quantity\": 1, \"unit_price\": 2000 }],\n  \"currency\": \"TZS\",\n  \"card_number\": \"4111111111110\",\n  \"shipping_address\": { \"street\": \"Kivukoni\", \"city\": \"Dar es Salaam\", \"country\": \"TZ\" }\n}"
+            }
+          },
+          "event": [{
+            "listen": "test",
+            "script": {
+              "exec": [
+                "pm.test('X-Correlation-ID echoed in response headers', () => {",
+                "  pm.expect(pm.response.headers.get('X-Correlation-ID')).to.equal('test-correlation-abc123');",
+                "});",
+                "pm.collectionVariables.set('trace_order_id', pm.response.json().order_id);"
+              ]
+            }
+          }]
+        },
+        {
+          "name": "OPS-02: Verify correlation ID in downstream service logs",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{BASE_PAYMENT}}/api/debug/logs/?correlation_id=test-correlation-abc123",
+              "query": [{ "key": "correlation_id", "value": "test-correlation-abc123" }]
+            }
+          },
+          "event": [{
+            "listen": "test",
+            "script": {
+              "exec": [
+                "pm.test('Payment service has log entries for this correlation_id', () => {",
+                "  const body = pm.response.json();",
+                "  pm.expect(body.entries.length).to.be.greaterThan(0);",
+                "});"
+              ]
+            }
+          }]
+        }
+      ]
+    },
+
+    {
+      "name": "9. Load & Concurrency",
+      "description": "Use Postman Collection Runner with iteration count = 10-100 to simulate concurrent requests.",
+      "item": [
+        {
+          "name": "PERF-01: Concurrent orders — run via Collection Runner (100 iterations)",
+          "request": {
+            "method": "POST",
+            "url": "{{BASE_ORDER}}/api/orders/",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"user_id\": \"user-load-{{$randomInt}}\",\n  \"items\": [{ \"sku\": \"WIDGET-001\", \"quantity\": 1, \"unit_price\": 10000 }],\n  \"currency\": \"TZS\",\n  \"card_number\": \"4111111111110\",\n  \"shipping_address\": { \"street\": \"Test St\", \"city\": \"Dar es Salaam\", \"country\": \"TZ\" }\n}"
+            }
+          },
+          "event": [{
+            "listen": "test",
+            "script": {
+              "exec": [
+                "pm.test('Each concurrent order gets 201', () => pm.response.to.have.status(201));",
+                "pm.test('Response time under 500ms', () => pm.expect(pm.response.responseTime).to.be.below(500));"
+              ]
+            }
+          }]
+        },
+        {
+          "name": "PERF-01: After load test — verify stock count is mathematically correct",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{BASE_INVENTORY}}/api/stock/WIDGET-001/",
+              "path": ["api", "stock", "WIDGET-001", ""]
+            }
+          },
+          "event": [{
+            "listen": "test",
+            "script": {
+              "exec": [
+                "pm.test('Stock level is non-negative after concurrent orders', () => {",
+                "  const body = pm.response.json();",
+                "  pm.expect(body.available).to.be.at.least(0);",
+                "});",
+                "pm.test('Stock math is correct (initial - sold = remaining)', () => {",
+                "  const body = pm.response.json();",
+                "  pm.expect(body.initial_stock - body.total_sold).to.equal(body.available + body.reserved);",
+                "});"
+              ]
+            }
+          }]
+        }
+      ]
+    }
+
+  ]
+}

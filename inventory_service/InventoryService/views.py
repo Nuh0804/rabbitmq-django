@@ -2,8 +2,9 @@ import graphene
 from django.utils import timezone
 import uuid
 from datetime import timedelta
+from django.db import transaction
 from .models import Product, StockLevel, StockReservation, StockReservationItem
-from .builder import _product_to_object, _reservation_to_object
+from .builder import InventoryBuilder
 from .dtos.ResponseDtos import ResponseObject
 from .dtos.inventoryDtos import ProductWithStockObject, StockLevelObject, StockReservationObject, CreateProductInputObject, UpdateProductInputObject, AdjustStockInputObject, CreateReservationInputObject
 
@@ -46,7 +47,7 @@ class CreateProductMutation(graphene.Mutation):
             )
             return cls(
                 response=ResponseObject.get_response(id="1"),
-                data=_product_to_object(product),
+                data=InventoryBuilder._product_to_object(product),
             )
         except Exception as e:
             print(e)
@@ -75,7 +76,7 @@ class UpdateProductMutation(graphene.Mutation):
             product.save()
             return cls(
                 response=ResponseObject.get_response(id="1"),
-                data=_product_to_object(product),
+                data=InventoryBuilder._product_to_object(product),
             )
         except Exception as e:
             print(e)
@@ -119,7 +120,6 @@ class AdjustStockMutation(graphene.Mutation):
         if input.quantity == 0:
             return cls(response=ResponseObject.get_response(id="10"), data=None)
 
-        from django.db import transaction
         try:
             with transaction.atomic():
                 stock = StockLevel.objects.select_for_update().get(sku=input.sku)
@@ -173,9 +173,6 @@ class CreateReservationMutation(graphene.Mutation):
         if StockReservation.objects.filter(order_id=input.order_id).exists():
             return cls(response=ResponseObject.get_response(id="12"), data=None)
 
-        from django.db import transaction
-        from datetime import timedelta
-
         ttl_hours = input.ttl_hours or 24
 
         try:
@@ -217,7 +214,7 @@ class CreateReservationMutation(graphene.Mutation):
 
                 return cls(
                     response=ResponseObject.get_response(id="1"),
-                    data=_reservation_to_object(reservation),
+                    data=InventoryBuilder._reservation_to_object(reservation),
                 )
         except Exception as e:
             print(e)
@@ -233,11 +230,9 @@ class ReleaseReservationMutation(graphene.Mutation):
         order_id = graphene.UUID(required=True)
 
     response = graphene.Field(ResponseObject)
-    data     = graphene.Field(StockReservationObject)
+    data = graphene.Field(StockReservationObject)
 
     def mutate(cls, root, info, order_id):
-        from django.db import transaction
-
         try:
             reservation = StockReservation.objects.prefetch_related("items").get(
                 order_id=order_id,
@@ -266,7 +261,7 @@ class ReleaseReservationMutation(graphene.Mutation):
 
                 return cls(
                     response=ResponseObject.get_response(id="1"),
-                    data=_reservation_to_object(reservation),
+                    data=InventoryBuilder._reservation_to_object(reservation),
                 )
         except Exception as e:
             print(e)
@@ -282,11 +277,9 @@ class ConfirmDispatchMutation(graphene.Mutation):
         order_id = graphene.UUID(required=True)
 
     response = graphene.Field(ResponseObject)
-    data     = graphene.Field(StockReservationObject)
+    data = graphene.Field(StockReservationObject)
 
     def mutate(cls, root, info, order_id):
-        from django.db import transaction
-
         try:
             reservation = StockReservation.objects.prefetch_related("items").get(
                 order_id=order_id,
@@ -307,16 +300,16 @@ class ConfirmDispatchMutation(graphene.Mutation):
                     if stock:
                         # Move from reserved → permanently gone (reduce total)
                         stock.reserved -= item.quantity
-                        stock.total    -= item.quantity
+                        stock.total -= item.quantity
                         stock.save()
 
-                reservation.status      = StockReservation.Status.DISPATCHED
+                reservation.status = StockReservation.Status.DISPATCHED
                 reservation.released_at = timezone.now()
                 reservation.save()
 
                 return cls(
                     response=ResponseObject.get_response(id="1"),
-                    data=_reservation_to_object(reservation),
+                    data=InventoryBuilder._reservation_to_object(reservation),
                 )
         except Exception as e:
             print(e)

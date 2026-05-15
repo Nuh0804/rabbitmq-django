@@ -1,7 +1,7 @@
 import graphene
 from .models import Order, OrderItem, ShippingAddress
 from .dtos.OrderDto import OrderObject, OrderItemObject, ShippingAddressObject
-from .builder import _order_to_object, _get_user_id
+from .builder import OrderBuilder
 from .dtos.ResponseDtos import ResponseObject
 from .dtos.OrderDto import CreateOrderInputObject, UpdateOrderStatusInputObject
 
@@ -13,7 +13,7 @@ class CreateOrderMutation(graphene.Mutation):
     data     = graphene.Field(OrderObject)
 
     def mutate(cls, root, info, input):
-        user_id = _get_user_id(info)
+        user_id = OrderBuilder._get_user_id(info)
         if not user_id:
             return cls(response=ResponseObject.get_response(id="10"), data=None)
 
@@ -59,7 +59,7 @@ class CreateOrderMutation(graphene.Mutation):
             )
             return cls(
                 response=ResponseObject.get_response(id="1"),
-                data=_order_to_object(order),
+                data=OrderBuilder._order_to_object(order),
             )
         except Exception as e:
             print(e)
@@ -96,7 +96,7 @@ class UpdateOrderStatusMutation(graphene.Mutation):
             order.save()
             return cls(
                 response=ResponseObject.get_response(id="1"),
-                data=_order_to_object(order),
+                data=OrderBuilder._order_to_object(order),
             )
         except Exception as e:
             print(e)
@@ -111,7 +111,7 @@ class CancelOrderMutation(graphene.Mutation):
     data     = graphene.Field(OrderObject)
 
     def mutate(cls, root, info, order_id):
-        user_id = _get_user_id(info)
+        user_id = OrderBuilder._get_user_id(info)
         try:
             order = Order.objects.get(id=order_id, user_id=user_id)
         except Order.DoesNotExist:
@@ -129,7 +129,7 @@ class CancelOrderMutation(graphene.Mutation):
             order.save()
             return cls(
                 response=ResponseObject.get_response(id="1"),
-                data=_order_to_object(order),
+                data=OrderBuilder._order_to_object(order),
             )
         except Exception as e:
             print(e)
@@ -144,7 +144,7 @@ class DeleteOrderMutation(graphene.Mutation):
     response = graphene.Field(ResponseObject)
 
     def mutate(cls, root, info, order_id):
-        user_id = _get_user_id(info)
+        user_id = OrderBuilder._get_user_id(info)
         try:
             order = Order.objects.get(id=order_id, user_id=user_id)
         except Order.DoesNotExist:

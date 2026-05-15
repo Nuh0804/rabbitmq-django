@@ -33,7 +33,7 @@ class SendEmailMutation(graphene.Mutation):
 
     def mutate(cls, root, info,  input):
         email_type = input.email_type
-        if email_type is not None:
+        if email_type is None:
             return cls(response=ResponseObject.get_response(id="10"), data=None)
         
         if email_type not in EMAIL_TEMPLATES:

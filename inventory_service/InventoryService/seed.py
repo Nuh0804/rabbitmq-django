@@ -5,7 +5,7 @@ Run: python manage.py shell < seed.py
 import uuid
 from datetime import datetime, timedelta
 from django.utils import timezone
-from inventory.models import Product, StockLevel, StockReservation, StockReservationItem
+from .models import Product, StockLevel, StockReservation, StockReservationItem
 
 PRODUCTS = [
     dict(sku="SHOE-RED-42",       name="Red Running Shoes Size 42",  category="Footwear",    unit_price=75000),

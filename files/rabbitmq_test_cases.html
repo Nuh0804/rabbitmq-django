@@ -1,0 +1,186 @@
+<h2 class="sr-only">RabbitMQ e-commerce project test cases, filterable by category and severity</h2>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:var(--font-sans)}
+.toolbar{display:flex;flex-wrap:wrap;gap:8px;padding:1rem 0 1.25rem}
+.chip{padding:5px 14px;border-radius:20px;border:0.5px solid var(--color-border-secondary);font-size:13px;cursor:pointer;background:var(--color-background-primary);color:var(--color-text-secondary);transition:all .15s}
+.chip.active{background:var(--color-background-tertiary);color:var(--color-text-primary);border-color:var(--color-border-primary);font-weight:500}
+.stats{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-bottom:1.25rem}
+.stat{background:var(--color-background-secondary);border-radius:var(--border-radius-md);padding:.75rem 1rem}
+.stat-n{font-size:22px;font-weight:500;line-height:1}
+.stat-l{font-size:12px;color:var(--color-text-secondary);margin-top:4px}
+.stat-n.crit{color:var(--color-text-danger)}
+.stat-n.high{color:#BA7517}
+.stat-n.med{color:var(--color-text-info)}
+.section{margin-bottom:1.5rem}
+.section-title{font-size:13px;font-weight:500;color:var(--color-text-secondary);text-transform:uppercase;letter-spacing:.06em;padding:0 0 8px;border-bottom:0.5px solid var(--color-border-tertiary);margin-bottom:10px}
+.tc{background:var(--color-background-primary);border:0.5px solid var(--color-border-tertiary);border-radius:var(--border-radius-md);padding:12px 14px;margin-bottom:8px;cursor:pointer;transition:border-color .15s}
+.tc:hover{border-color:var(--color-border-secondary)}
+.tc.open{border-color:var(--color-border-primary)}
+.tc-head{display:flex;align-items:flex-start;gap:10px}
+.sev{font-size:11px;font-weight:500;padding:3px 8px;border-radius:10px;white-space:nowrap;flex-shrink:0;margin-top:1px}
+.sev.critical{background:var(--color-background-danger);color:var(--color-text-danger)}
+.sev.high{background:#FAEEDA;color:#633806}
+.sev.medium{background:var(--color-background-info);color:var(--color-text-info)}
+.sev.low{background:var(--color-background-secondary);color:var(--color-text-secondary)}
+.tc-name{font-size:14px;font-weight:500;color:var(--color-text-primary);flex:1}
+.tc-id{font-size:11px;color:var(--color-text-tertiary);margin-left:auto;flex-shrink:0}
+.tc-body{display:none;margin-top:12px;border-top:0.5px solid var(--color-border-tertiary);padding-top:12px}
+.tc.open .tc-body{display:block}
+.row{display:grid;grid-template-columns:120px 1fr;gap:4px 12px;font-size:13px;margin-bottom:6px;align-items:start}
+.lbl{color:var(--color-text-secondary);padding-top:1px}
+.val{color:var(--color-text-primary);line-height:1.5}
+.val.code{font-family:var(--font-mono);font-size:12px;background:var(--color-background-secondary);padding:2px 6px;border-radius:4px;display:inline-block}
+.tag{display:inline-block;font-size:11px;padding:2px 8px;border-radius:10px;background:var(--color-background-secondary);color:var(--color-text-secondary);margin:2px 2px 0 0}
+.hidden{display:none}
+.empty{text-align:center;padding:2rem;color:var(--color-text-tertiary);font-size:14px}
+</style>
+
+<div class="toolbar" id="cats"></div>
+
+<div class="stats" id="stats">
+  <div class="stat"><div class="stat-n crit" id="s-critical">0</div><div class="stat-l">Critical</div></div>
+  <div class="stat"><div class="stat-n high" id="s-high">0</div><div class="stat-l">High</div></div>
+  <div class="stat"><div class="stat-n med" id="s-medium">0</div><div class="stat-l">Medium</div></div>
+  <div class="stat"><div class="stat-n" id="s-low">0</div><div class="stat-l">Low</div></div>
+</div>
+
+<div id="board"></div>
+
+<script>
+const TESTS = [
+  {id:"ORD-01",cat:"Order Service",sev:"critical",name:"Duplicate order submission",given:"User double-clicks Place Order",when:"Two identical POST /orders/ arrive within 500ms with same cart + user",then:"Only one order created; second returns 409 with existing order_id; DB has exactly one row",tags:["idempotency","race-condition"]},
+  {id:"ORD-02",cat:"Order Service",sev:"critical",name:"Order published but DB write fails",given:"Order Service publishes to RabbitMQ then DB transaction rolls back",when:"Simulated DB timeout after channel.basic_publish()",then:"Message is NOT published (use transactional outbox or publish inside DB transaction); no orphan message in queue",tags:["consistency","outbox-pattern"]},
+  {id:"ORD-03",cat:"Order Service",sev:"high",name:"Order created with zero items",given:"Malformed POST /orders/ with empty items array",when:"Request reaches Order Service",then:"Returns 422; no message published; no DB row created",tags:["validation"]},
+  {id:"ORD-04",cat:"Order Service",sev:"high",name:"Order cancelled mid-flight",given:"order.created already published; Payment Service not yet consumed it",when:"User cancels order via DELETE /orders/{id}/",then:"order.cancelled published; Payment Service checks order status before charging and skips; order status = cancelled",tags:["cancellation","race-condition"]},
+  {id:"ORD-05",cat:"Order Service",sev:"medium",name:"Order status reflects full lifecycle",given:"Successful end-to-end flow",when:"GET /orders/{id}/ polled after each step",then:"Status transitions: pending -> payment_processing -> paid -> fulfilling -> shipped; no skipped states",tags:["state-machine"]},
+  {id:"ORD-06",cat:"Order Service",sev:"medium",name:"Order for out-of-stock item",given:"Inventory shows 0 units at order creation time",when:"POST /orders/ submitted",then:"Returns 400 immediately; no message published; no charge attempted",tags:["validation","inventory"]},
+
+  {id:"PAY-01",cat:"Payment Service",sev:"critical",name:"Payment consumer receives same message twice",given:"Network blip causes RabbitMQ to redeliver order.created before ACK received",when:"Consumer processes message; before ACK, broker redelivers (redelivered=True)",then:"Idempotency key prevents double charge; payment table has exactly one row for that order_id",tags:["idempotency","redelivery"]},
+  {id:"PAY-02",cat:"Payment Service",sev:"critical",name:"Card charge succeeds but ACK lost",given:"Stripe returns success; consumer crashes before channel.basic_ack()",when:"RabbitMQ redelivers order.created",then:"Idempotency key check finds existing payment row; skips charge; ACKs message; no second charge",tags:["idempotency","crash-recovery"]},
+  {id:"PAY-03",cat:"Payment Service",sev:"critical",name:"Card declined",given:"Stripe returns card_declined",when:"Payment Service processes order.created",then:"Publishes payment.failed; Order Service consumes it and sets order status = payment_failed; inventory not touched; shipping not triggered",tags:["failure-path","compensation"]},
+  {id:"PAY-04",cat:"Payment Service",sev:"critical",name:"Payment Service is down when order is created",given:"Payment Service container stopped",when:"Order Service publishes order.created",then:"Message sits in queue (durable); when Payment Service restarts, it processes the message and completes the flow; no message lost",tags:["service-down","durability"]},
+  {id:"PAY-05",cat:"Payment Service",sev:"high",name:"Stripe API timeout on first attempt",given:"Stripe takes >30s to respond",when:"Payment consumer calls Stripe",then:"Message NACKed and requeued; retried up to 3 times with backoff; after 3 failures goes to payment.dlq; order status = payment_failed",tags:["retry","dlq","timeout"]},
+  {id:"PAY-06",cat:"Payment Service",sev:"high",name:"Partial payment amount",given:"Stripe charged $0.00 due to a bug in fare calculation",when:"payment.succeeded published with amount=0",then:"Downstream validation in Inventory Service rejects the event; alert raised; order held for manual review",tags:["validation","anomaly"]},
+  {id:"PAY-07",cat:"Payment Service",sev:"high",name:"Currency mismatch between order and payment",given:"Order created in TZS; payment processed in USD",when:"Payment Service publishes payment.succeeded",then:"Amount field carries currency code; Inventory Service asserts currency matches order; mismatch raises alert",tags:["validation","data-integrity"]},
+  {id:"PAY-08",cat:"Payment Service",sev:"medium",name:"Refund triggers compensation chain",given:"User requests refund after payment.succeeded but before stock.reserved",when:"POST /orders/{id}/refund/",then:"payment.refunded published; Inventory Service releases reservation if held; Shipping Service cancels if not dispatched; Notification sends refund email",tags:["compensation","saga"]},
+  {id:"PAY-09",cat:"Payment Service",sev:"medium",name:"Payment DLQ message inspected and replayed",given:"3 retries exhausted; message in payment.dlq",when:"Operator fixes root cause and calls POST /dlq/replay/",then:"Message re-published to payment.queue; processed successfully; order completes normally",tags:["dlq","ops"]},
+
+  {id:"INV-01",cat:"Inventory Service",sev:"critical",name:"Double stock deduction from redelivery",given:"Inventory Service crashes after deducting stock but before ACKing payment.succeeded",when:"RabbitMQ redelivers message on restart",then:"Idempotency check on order_id prevents second deduction; stock count unchanged from correct value",tags:["idempotency","redelivery"]},
+  {id:"INV-02",cat:"Inventory Service",sev:"critical",name:"Concurrent orders for last unit in stock",given:"Two orders both pass validation when stock=1",when:"Both payment.succeeded arrive at two worker instances simultaneously",then:"DB row-level lock (SELECT FOR UPDATE) ensures only one deduction; second gets stock.failed; its order compensated",tags:["concurrency","race-condition","locking"]},
+  {id:"INV-03",cat:"Inventory Service",sev:"critical",name:"Inventory Service is down; payment already succeeded",given:"Inventory Service container stopped",when:"payment.succeeded sits in inventory.queue",then:"Message retained (durable queue); when service restarts it processes message; stock deducted; flow continues",tags:["service-down","durability"]},
+  {id:"INV-04",cat:"Inventory Service",sev:"high",name:"Stock goes negative",given:"Bug in deduction logic subtracts wrong quantity",when:"stock_level would go below 0",then:"DB constraint (CHECK stock_level >= 0) rejects; NACK with no-requeue; goes to DLQ; alert raised",tags:["data-integrity","constraint"]},
+  {id:"INV-05",cat:"Inventory Service",sev:"high",name:"Stock reserved but shipment never created",given:"stock.reserved published; Shipping Service crashes before consuming",when:"Shipping Service down for 10 minutes",then:"Message retained in shipping.queue; on restart Shipping Service processes it; stock remains reserved until dispatched or timeout",tags:["service-down","reservation-expiry"]},
+  {id:"INV-06",cat:"Inventory Service",sev:"medium",name:"Stock reservation expires without shipment",given:"stock.reserved but Shipping Service never consumed within TTL",when:"Reservation TTL (e.g. 24h) elapses",then:"Scheduled job releases reservation; publishes stock.released; order set to fulfillment_failed; notification sent",tags:["ttl","compensation"]},
+  {id:"INV-07",cat:"Inventory Service",sev:"medium",name:"Multiple items in one order",given:"Order contains 3 different products",when:"stock.reserved needs to cover all 3",then:"All 3 deductions atomic (single DB transaction); if any fails, all 3 rolled back; stock.failed published",tags:["atomicity","multi-item"]},
+
+  {id:"SHIP-01",cat:"Shipping Service",sev:"critical",name:"Duplicate shipment for same order",given:"stock.reserved delivered twice due to redelivery",when:"Shipping Service processes second delivery",then:"Idempotency check on order_id prevents second shipment row; only one shipment.created published",tags:["idempotency","redelivery"]},
+  {id:"SHIP-02",cat:"Shipping Service",sev:"high",name:"Shipping Service is down when stock reserved",given:"Shipping Service container stopped",when:"stock.reserved published to shipping.queue",then:"Message durable; on restart Shipping processes it; shipment created; no message lost",tags:["service-down","durability"]},
+  {id:"SHIP-03",cat:"Shipping Service",sev:"high",name:"Courier API is down",given:"External courier API returns 503",when:"Shipping Service tries to create shipment",then:"NACK; retry with exponential backoff (30s, 2m, 10m); after 3 failures goes to DLQ; alert to ops; order stuck in fulfilling state",tags:["external-api","retry","dlq"]},
+  {id:"SHIP-04",cat:"Shipping Service",sev:"medium",name:"Shipping address invalid",given:"Order has malformed address (missing city)",when:"Courier API rejects address",then:"Non-retryable rejection; message NACKed no-requeue; goes to DLQ; notification sent to user asking for address correction",tags:["validation","dlq"]},
+  {id:"SHIP-05",cat:"Shipping Service",sev:"medium",name:"Tracking number not generated",given:"Courier API returns success but no tracking_number field",when:"Shipping Service tries to publish shipment.created",then:"Validation before publish raises error; message NACKed; retried; if still no tracking_number after 3 tries, alert ops",tags:["validation","external-api"]},
+  {id:"SHIP-06",cat:"Shipping Service",sev:"low",name:"Priority queue ordering",given:"premium order (priority=10) and standard order (priority=1) both queued",when:"Shipping Service worker comes online",then:"Premium order consumed and processed first regardless of arrival order",tags:["priority-queue"]},
+
+  {id:"NOTIF-01",cat:"Notification Service",sev:"high",name:"Notification Service is down for 24 hours",given:"Notification Service stopped; messages accumulate in notify.queue",when:"Service restarts",then:"Messages with TTL still valid are processed; expired messages (TTL=24h) discarded to DLQ; no emails sent for stale events",tags:["service-down","ttl","message-expiry"]},
+  {id:"NOTIF-02",cat:"Notification Service",sev:"high",name:"Email provider is down",given:"SendGrid returns 503",when:"Notification Service tries to send email",then:"NACK with backoff retry; after 3 fails, moves to DLQ; does NOT block other notifications; auto-ACK pattern means one failure doesn't stall the queue",tags:["external-api","retry","isolation"]},
+  {id:"NOTIF-03",cat:"Notification Service",sev:"medium",name:"User receives duplicate emails",given:"payment.succeeded redelivered due to network blip",when:"Notification Service processes it twice",then:"Deduplication by event_id in Redis prevents second email send; exactly one email delivered",tags:["idempotency","deduplication"]},
+  {id:"NOTIF-04",cat:"Notification Service",sev:"medium",name:"Fanout reaches both email and SMS queues",given:"payment.succeeded published to fanout exchange",when:"Notification Service has both email and SMS workers",then:"Both email AND SMS sent; failure of one does not affect the other; each has independent queue and consumer",tags:["fanout","isolation"]},
+  {id:"NOTIF-05",cat:"Notification Service",sev:"low",name:"User has opted out of SMS",given:"User preference: sms_enabled=False",when:"SMS worker consumes notification.send",then:"Worker checks user preferences; skips send; ACKs message normally; no error raised",tags:["user-preferences","soft-skip"]},
+
+  {id:"BROKER-01",cat:"RabbitMQ Broker",sev:"critical",name:"RabbitMQ restarts mid-flow",given:"Order created, payment.succeeded in queue, Inventory not yet consumed",when:"RabbitMQ container restarted",then:"Durable queues and persistent messages survive restart; Inventory Service resumes from where it left off; no messages lost",tags:["durability","persistence","broker-restart"]},
+  {id:"BROKER-02",cat:"RabbitMQ Broker",sev:"critical",name:"Message published without persistence flag",given:"Developer forgets delivery_mode=2 on a critical message",when:"RabbitMQ restarts",then:"Test asserts all messages on payment.queue and inventory.queue are delivery_mode=2; fail build if not",tags:["durability","config"]},
+  {id:"BROKER-03",cat:"RabbitMQ Broker",sev:"high",name:"Queue fills up (consumer lag)",given:"Inventory Service is slow; payment.succeeded arriving faster than consumed",when:"Queue depth exceeds 10,000 messages",then:"Alert fires; back-pressure mechanism slows Order Service publish rate or spins up additional Inventory workers",tags:["backpressure","monitoring"]},
+  {id:"BROKER-04",cat:"RabbitMQ Broker",sev:"high",name:"Dead letter queue fills up with no consumer",given:"DLQ has no consumer attached",when:"Messages pile up in payment.dlq",then:"Alert fires after DLQ depth > 50; ops notified; DLQ must always have a monitoring consumer that logs and alerts",tags:["dlq","monitoring","ops"]},
+  {id:"BROKER-05",cat:"RabbitMQ Broker",sev:"medium",name:"Connection loss during publish",given:"Network drops between Order Service and RabbitMQ after channel open but before publish",when:"Order Service calls basic_publish",then:"pika raises ConnectionClosed; Order Service retries connection with backoff; message eventually published; no duplicate",tags:["network","retry","connection"]},
+  {id:"BROKER-06",cat:"RabbitMQ Broker",sev:"medium",name:"Consumer prefetch starvation",given:"prefetch_count=0 (unlimited) on Inventory Service",when:"Broker delivers 1000 messages to one slow worker",then:"Other workers starved; test asserts prefetch_count=1 set on all consumers; fair dispatch verified",tags:["prefetch","fairness","config"]},
+
+  {id:"DATA-01",cat:"Data Consistency",sev:"critical",name:"Order paid but stock never deducted",given:"payment.succeeded published; Inventory Service down permanently",when:"System state checked after 1 hour",then:"Reconciliation job detects orders in paid status with no stock_reservation row; alerts ops; compensating action triggered",tags:["consistency","reconciliation"]},
+  {id:"DATA-02",cat:"Data Consistency",sev:"critical",name:"Stock deducted but payment failed",given:"Race: stock.reserved published before payment confirmation",when:"Payment then fails",then:"Compensation chain: payment.failed triggers inventory to publish stock.released; stock restored to original level; order cancelled",tags:["saga","compensation","rollback"]},
+  {id:"DATA-03",cat:"Data Consistency",sev:"critical",name:"Outbox pattern: message lost between DB and broker",given:"Order Service saves order to DB then calls basic_publish; crash occurs between the two",when:"Service restarts",then:"Outbox table has unpublished row; background publisher picks it up and publishes; no lost message",tags:["outbox-pattern","consistency"]},
+  {id:"DATA-04",cat:"Data Consistency",sev:"high",name:"Cross-service data mismatch audit",given:"Order Service says order=paid; Payment Service has no payment row for that order_id",when:"Nightly reconciliation job runs",then:"Mismatch detected and logged; alert raised; at most 1 order in mismatch per 10,000 is acceptable SLA",tags:["reconciliation","audit"]},
+  {id:"DATA-05",cat:"Data Consistency",sev:"high",name:"Event ordering violation",given:"payment.failed arrives before payment.succeeded for same order (network reorder)",when:"Order Service consumes both",then:"Order Service uses event timestamps and sequence numbers; later event wins; state machine rejects backwards transitions",tags:["ordering","state-machine","event-sequencing"]},
+  {id:"DATA-06",cat:"Data Consistency",sev:"medium",name:"Message schema change breaks consumer",given:"Payment Service adds required field charge_method to payment.succeeded",when:"Old Inventory Service consumer receives new message",then:"Consumer handles missing field gracefully (default value or skip); no crash; no NACK loop; schema versioning documented",tags:["schema-evolution","backward-compat"]},
+
+  {id:"PERF-01",cat:"Performance & Load",sev:"high",name:"100 concurrent orders",given:"Load test: 100 POST /orders/ in parallel",when:"All 100 processed end-to-end",then:"No duplicate charges; stock count mathematically correct (initial - sold = remaining); zero messages lost",tags:["concurrency","load-test"]},
+  {id:"PERF-02",cat:"Performance & Load",sev:"high",name:"Consumer restart during high load",given:"500 messages in inventory.queue; 3 consumer instances",when:"One instance killed mid-consume",then:"RabbitMQ redelivers unACKed messages to remaining workers; no messages lost; no double-processing",tags:["consumer-restart","rebalance","load-test"]},
+  {id:"PERF-03",cat:"Performance & Load",sev:"medium",name:"Slow consumer does not block fast consumer",given:"SMS worker is slow (2s per message); email worker is fast (50ms)",when:"10 notifications arrive simultaneously",then:"Email and SMS each have independent queues; email worker drains its queue before SMS finishes; no cross-blocking",tags:["isolation","queue-design"]},
+  {id:"PERF-04",cat:"Performance & Load",sev:"medium",name:"Message TTL does not cause silent data loss",given:"notify.queue has TTL=86400s (24h)",when:"TTL expires on a message",then:"Expired message routes to notify.dlq (dead-letter-exchange set); NOT silently dropped; ops can inspect and replay if needed",tags:["ttl","dlq","config"]},
+
+  {id:"SEC-01",cat:"Security",sev:"high",name:"Unauthenticated publish to queue",given:"Attacker tries to publish directly to payment.queue via AMQP",when:"Connection attempted without valid credentials",then:"RabbitMQ rejects connection; vhost permissions enforce that only Payment Service credentials can publish to that exchange",tags:["auth","permissions"]},
+  {id:"SEC-02",cat:"Security",sev:"high",name:"Message payload injection",given:"Malicious order_id: '1; DROP TABLE orders;--'",when:"Order Service receives and publishes",then:"All services treat message fields as data not code; parameterised queries used; no SQL executed; message processed normally or rejected cleanly",tags:["injection","input-sanitization"]},
+  {id:"SEC-03",cat:"Security",sev:"medium",name:"Sensitive data in message body",given:"Payment Service publishes payment.succeeded",when:"Message body inspected in RabbitMQ management UI",then:"Full card number NOT present; only last 4 digits and payment_intent_id; PII minimised in transit",tags:["data-privacy","pii"]},
+
+  {id:"OPS-01",cat:"Observability & Ops",sev:"high",name:"No health endpoint on consumer",given:"Inventory Service worker is running but stuck in infinite retry loop",when:"Monitoring polls /health/",then:"Health endpoint reports consumer_lag, last_processed_at, retry_count; stuck consumer detected within 60s",tags:["health-check","monitoring"]},
+  {id:"OPS-02",cat:"Observability & Ops",sev:"medium",name:"End-to-end trace across services",given:"Order placed; flows through 4 services",when:"Logs inspected",then:"Same correlation_id (passed as message header) appears in logs of all 4 services; full trace reconstructable",tags:["tracing","correlation-id","logging"]},
+  {id:"OPS-03",cat:"Observability & Ops",sev:"medium",name:"DLQ replay does not create duplicates",given:"10 messages in payment.dlq; root cause fixed",when:"Operator triggers bulk replay",then:"Each replayed message gets new idempotency check; exactly 10 payments processed; 0 duplicates",tags:["dlq","replay","idempotency"]},
+  {id:"OPS-04",cat:"Observability & Ops",sev:"low",name:"Message rate metrics exported",given:"Prometheus scrape endpoint on each service",when:"Grafana dashboard loaded",then:"publish_rate, consume_rate, dlq_depth, consumer_lag all visible and non-zero during load test",tags:["metrics","observability"]}
+];
+
+const CATS = [...new Set(TESTS.map(t=>t.cat))];
+const SEVS = ["critical","high","medium","low"];
+let activeCat = "All";
+
+function badge(s){return `<span class="sev ${s}">${s}</span>`}
+
+function render(){
+  const board = document.getElementById("board");
+  const filtered = activeCat==="All" ? TESTS : TESTS.filter(t=>t.cat===activeCat);
+  const byCat = {};
+  filtered.forEach(t=>{
+    if(!byCat[t.cat]) byCat[t.cat]=[];
+    byCat[t.cat].push(t);
+  });
+  let html = filtered.length===0 ? '<div class="empty">No tests in this category.</div>' : "";
+  Object.entries(byCat).forEach(([cat,tests])=>{
+    html += `<div class="section"><div class="section-title">${cat} (${tests.length})</div>`;
+    tests.forEach(t=>{
+      html += `<div class="tc" onclick="toggle('${t.id}')">
+        <div class="tc-head">
+          ${badge(t.sev)}
+          <span class="tc-name">${t.name}</span>
+          <span class="tc-id">${t.id}</span>
+        </div>
+        <div class="tc-body" id="body-${t.id}">
+          <div class="row"><span class="lbl">Given</span><span class="val">${t.given}</span></div>
+          <div class="row"><span class="lbl">When</span><span class="val">${t.when}</span></div>
+          <div class="row"><span class="lbl">Then (assert)</span><span class="val">${t.then}</span></div>
+          <div class="row"><span class="lbl">Tags</span><span class="val">${t.tags.map(g=>`<span class="tag">${g}</span>`).join("")}</span></div>
+        </div>
+      </div>`;
+    });
+    html += `</div>`;
+  });
+  board.innerHTML = html;
+  updateStats(filtered);
+}
+
+function toggle(id){
+  const tc = document.getElementById("body-"+id).closest(".tc");
+  tc.classList.toggle("open");
+}
+
+function updateStats(filtered){
+  SEVS.forEach(s=>{
+    document.getElementById("s-"+s).textContent = filtered.filter(t=>t.sev===s).length;
+  });
+}
+
+function buildChips(){
+  const bar = document.getElementById("cats");
+  ["All",...CATS].forEach(c=>{
+    const btn = document.createElement("button");
+    btn.className = "chip" + (c===activeCat?" active":"");
+    btn.textContent = c === "All" ? `All (${TESTS.length})` : `${c} (${TESTS.filter(t=>t.cat===c).length})`;
+    btn.onclick = ()=>{
+      activeCat = c;
+      document.querySelectorAll(".chip").forEach(b=>b.classList.remove("active"));
+      btn.classList.add("active");
+      render();
+    };
+    bar.appendChild(btn);
+  });
+}
+
+buildChips();
+render();
+</script>
