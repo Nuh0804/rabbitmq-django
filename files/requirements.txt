@@ -1,0 +1,20 @@
+# API Gateway requirements
+# Install: pip install -r requirements.txt
+
+django>=4.2
+graphene-django>=3.2
+graphene>=3.3
+
+httpx                       # async HTTP client — calls downstream services
+
+promise                     # DataLoader for batching (fixes N+1 HTTP calls)
+
+python-jose[cryptography]   # JWT verification at gateway
+
+python-decouple             # reads .env variables
+
+# Optional but recommended
+django-cors-headers         # CORS headers if frontend is on a different origin
+python-json-logger          # structured JSON logging (used in settings_additions.py)
+uvicorn[standard]           # ASGI server for production (async support)
+gunicorn                    # process manager for production
