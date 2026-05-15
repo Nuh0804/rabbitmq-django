@@ -13,12 +13,12 @@ config = dotenv_values(".env")
 EMAIL_TEMPLATES = {
     "ACCOUNT_CREATED": {
         "subject": "my site Activate Account",
-        "template_path": "../htmls/create_password.html",
+        "template_path": "htmls/create_password.html",
         "url_path": "/auth/setPwd/"
     },
     "PASSWORD_RESET": {
         "subject": "my site Password Reset",
-        "template_path": "../htmls/forget_password.html",
+        "template_path": "htmls/forget_password.html",
         "url_path": "auth/password-reset/"
     },
 }
