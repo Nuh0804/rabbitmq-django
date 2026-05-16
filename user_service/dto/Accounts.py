@@ -15,6 +15,19 @@ class UserProfileInputObject(graphene.InputObjectType):
     # profile_password = graphene.String(required=True)
 
 
+class UserInputObjectType(graphene.InputObjectType):
+    first_name = graphene.String()
+    last_name = graphene.String()
+    username = graphene.String()
+    email = graphene.String()
+
+class EmailDataInputObject(graphene.InputObjectType):
+    email_type = graphene.String()
+    email = graphene.String()
+    user = UserInputObjectType()
+    request_token = graphene.String()
+
+
 class UserProfileObject(graphene.ObjectType):
     id = graphene.String()
     profile_unique_id = graphene.String()
@@ -27,14 +40,13 @@ class UserProfileObject(graphene.ObjectType):
     user_roles = graphene.Field(UserRoleObjects)
 
 
-
 class UserFilteringInputObject(graphene.InputObjectType):
     profile_unique_id = graphene.String()
     # role_unique_id = graphene.String()
     page_number = graphene.Int()
     items_per_page = graphene.Int()
 
-class USerProfileResponseObject(graphene.ObjectType):
+class UserProfileResponseObject(graphene.ObjectType):
     data = graphene.List(UserProfileObject)
     response = graphene.Field(ResponseObject)
     page = graphene.Field(PageObject)

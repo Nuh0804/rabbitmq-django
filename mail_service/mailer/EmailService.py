@@ -24,6 +24,7 @@ class CustomEmailBackend(BaseEmailBackend):
         EMAIL_USE_TLS = config['EMAIL_USE_TLS']
         DEFAULT_FROM_EMAIL = config['DEFAULT_FROM_EMAIL']
                 
+        print("hapaa")
         html_content = render_to_string(html_template, {'data': email_messages})
         
         # Create a Jinja2 environment with the HTML template
@@ -50,8 +51,10 @@ class CustomEmailBackend(BaseEmailBackend):
 
         # Login to the email account
         server.login(EMAIL_USER, EMAIL_PASSWORD)
+        print("hapaa2")
 
         # Send the email
+        print(email_messages['receiver_details'])
         server.sendmail(DEFAULT_FROM_EMAIL, email_messages['receiver_details'], msg.as_string())
 
         # Disconnect from the server

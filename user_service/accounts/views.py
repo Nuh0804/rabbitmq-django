@@ -1,6 +1,4 @@
-from django.shortcuts import render
 
-# Create your views here.
 from datetime import datetime, timedelta
 from django.utils import timezone
 from dotenv import dotenv_values
@@ -13,12 +11,15 @@ from django.db import transaction
 from django.contrib.auth.models import User
 from accounts.models import  *
 from uaa.models import UserRoles, UsersWithRoles
-# from utils.EmailUtils import CustomEmailBackend
+from utils.Api import ExternalServices 
 from utils.UserUtils import UserUtils
-# from utils.Validator import Validator
 
 config = dotenv_values(".env")
-
+# Create your views here.
+EMAIL_TYPES = {
+    "account_created":"ACCOUNT_CREATED",
+    "password_reset":"PASSWORD_RESET"
+}
 
 class CreateUserMutation(graphene.Mutation):
     class Arguments:
@@ -53,40 +54,8 @@ class CreateUserMutation(graphene.Mutation):
              user_with_role_role = user_role,
              user_with_role_user = user,
             )
-
-
-
-#         user = User.objects.create(
-#             first_name=input.profile_firstname, 
-#             last_name=input.profile_lastname, 
-#             username=input.profile_email, 
-#             email=input.profile_email
-#         )
-        
-#         user.set_password(input.profile_password)
-
-#         user.save()
-
-
-
-#         user_profile = UserProfile.objects.create(
-#             profile_phone=input.profile_phone if input.profile_phone else None,
-#             profile_user=user,
-#             profile_affiliated_organization  = input.profile_organization,
-#             profile_type = input.profile_type
-#         )
-
-#         UsersWithRoles.objects.create(
-#             user_with_role_role = user_role,
-#             user_with_role_user = user,
-#         )
         
         request_token = UserUtils.get_unique_token()
-                
-        # ActivateAccountTokenUser.objects.create(
-        #     token_user = user,
-        #     token_token = request_token
-        # )
         
         SavePasswordRequestUsers.objects.create(
             save_pswd_user = user,
@@ -94,16 +63,19 @@ class CreateUserMutation(graphene.Mutation):
         )
 
         #TODO switch with the email service
-        # url = config['FRONTEND_DOMAIN'] + f"/auth/setPwd/{request_token}"
-        # body = {
-        #     'receiver_details': user.email,
-        #     'user': user,
-        #     'url': url,
-        #     'subject': "my site Activate Account"
-        # }        
-
-        # CustomEmailBackend.send_messages(body, '../htmls/create_password.html')
-        
+        user_data = {
+            "firstName": user.first_name,
+            "lastName": user.last_name,
+            "username": user.username,
+            "email":user.email
+            }
+        email_payload = {
+            "emailType":EMAIL_TYPES["account_created"],
+            "email":user.email,
+            "user":user_data,
+            "requestToken":request_token
+            }
+        ExternalServices.send_email(email_payload)
         
         response_body = UserProfileBuilder.get_user_profile_data(id=user_profile.profile_unique_id)
         return self(response=ResponseObject.get_response(id="1"), data=response_body)

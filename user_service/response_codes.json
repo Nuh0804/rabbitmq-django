@@ -1,0 +1,136 @@
+[
+    {
+      "id": "0",
+      "status": false,
+      "code": "9000",
+      "message": "Permission denied, un-authorized request"
+    },
+    {
+      "id": "1",
+      "status": true,
+      "code": "9001",
+      "message": "Success"
+    },
+    {
+      "id": "2",
+      "status": false,
+      "code": "9002",
+      "message": "Invalid phone number"
+    },
+    {
+      "id": "3",
+      "status": false,
+      "code": "9003",
+      "message": "Invalid reset password token"
+    },
+    {
+      "id": "4",
+      "status": false,
+      "code": "9004",
+      "message": "Expired reset password token"
+    },
+    {
+      "id": "5",
+      "status": false,
+      "code": "9005",
+      "message": "Password mis-match"
+    },
+    {
+      "id": "6",
+      "status": false,
+      "code": "9006",
+      "message": "Invalid credentials"
+    },
+    {
+      "id": "7",
+      "status": false,
+      "code": "9007",
+      "message": "Provide mandatory filters"
+    },
+    {
+      "id": "8",
+      "status": false,
+      "code": "9008",
+      "message": "Error occurred while processing request"
+    },
+    {
+      "id": "9",
+      "status": false,
+      "code": "9009",
+      "message": "Duplicated record found"
+    },
+    {
+      "id": "10",
+      "status": false,
+      "code": "9010",
+      "message": "No profile found"
+    },
+    {
+      "id": "11",
+      "status": false,
+      "code": "9011",
+      "message": "All mandatory fields are required"
+    },
+    {
+      "id": "12",
+      "status": false,
+      "code": "9012",
+      "message": "User with this email already exists"
+    },
+    {
+      "id": "13",
+      "status": false,
+      "code": "9013",
+      "message": "Invalid password. Please choose a stronger password with at least 8-16 characters, a mix of uppercase and lowercase letters, numbers, and special characters."
+    },
+    {
+      "id": "14",
+      "status": false,
+      "code": "9014",
+      "message": "Invalid Inputs Provided, Please Check Your Inputs"
+    },
+    {
+      "id": "15",
+      "status": false,
+      "code": "9015",
+      "message": "Invalid account activation token"
+    },
+    {
+      "id": "16",
+      "status": false,
+      "code": "9016",
+      "message": "Invalid email address"
+    },
+    {
+      "id": "17",
+      "status": false,
+      "code": "9017",
+      "message": "Role with these details already exists"
+    },
+    {
+      "id": "18",
+      "status": false,
+      "code": "9018",
+      "message": "Only institution admins can perform this action"
+    },
+    {
+      "id": "19",
+      "status": false,
+      "code": "9018",
+      "message": "Token Expired"
+    },
+    {
+      "id": "20",
+      "status": false,
+      "code": "9018",
+      "message": "Email Not Found, Please Register Again"
+    },
+    {
+      "id": "21",
+      "status": false,
+      "code": "9018",
+      "message": "File is Too large"
+    }
+
+  ]
+  

@@ -14,8 +14,8 @@ from django.db.models import Q
 
 
 class Query(ObjectType):
-    get_users = graphene.Field(USerProfileResponseObject,filtering=UserFilteringInputObject(required=True))
-    get_user_profile_and_role = graphene.Field(USerProfileResponseObject,filtering=UserFilteringInputObject())
+    get_users = graphene.Field(UserProfileResponseObject,filtering=UserFilteringInputObject(required=True))
+    get_user_profile_and_role = graphene.Field(UserProfileResponseObject,filtering=UserFilteringInputObject())
 
 
   # @has_query_access(["can_manage_user"])
