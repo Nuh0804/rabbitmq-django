@@ -53,29 +53,9 @@ needs to change.
 import time
 import uuid
 import logging
+from .Errors import RetryablePaymentError, NonRetryablePaymentError
 
 logger = logging.getLogger(__name__)
-
-# ---------------------------------------------------------------------------
-# Exceptions — mirrors what a real SDK would raise
-# ---------------------------------------------------------------------------
-
-class RetryablePaymentError(Exception):
-    """
-    Transient error — the gateway may succeed if tried again.
-    Your consumer should NACK the message and let the retry/DLQ
-    mechanism handle it.
-    """
-    pass
-
-
-class NonRetryablePaymentError(Exception):
-    """
-    Permanent error — retrying will not help.
-    Your consumer should publish payment.failed and ACK the message.
-    """
-    pass
-
 
 # ---------------------------------------------------------------------------
 # Card behaviour map — last digit controls outcome
@@ -105,163 +85,164 @@ _SIMULATED_LATENCY = 0.4
 # actually times out and raises RetryablePaymentError.
 _SIMULATED_TIMEOUT_DELAY = 35
 
+TEST_CARDS = {
+        "4111111111110": "Always succeeds",
+        "4111111111111": "Card declined (non-retryable)",
+        "4111111111112": "Insufficient funds (non-retryable)",
+        "4111111111113": "Gateway timeout (retryable — triggers DLQ after 3 attempts)",
+        "4111111111114": "Gateway timeout (retryable)",
+        "4111111111117": "Network error (retryable)",
+        "4111111111119": "Fraud blocked (non-retryable)",
+    }
 
-# ---------------------------------------------------------------------------
-# Public API
-# ---------------------------------------------------------------------------
+    
+class PaymentSimulator:
+    @staticmethod
+    def charge_card(
+        card_number: str,
+        amount: int,
+        currency: str,
+        order_id: str,
+    ) -> dict:
+        """
+        Simulate charging a payment card.
 
-def charge_card(
-    card_number: str,
-    amount: int,
-    currency: str,
-    order_id: str,
-) -> dict:
-    """
-    Simulate charging a payment card.
+        Parameters
+        ----------
+        card_number : str
+            16-digit card number string. Last digit controls the outcome.
+        amount : int
+            Charge amount in the smallest currency unit
+            (e.g. 150000 for TZS 150,000 or 1500 for USD 15.00).
+        currency : str
+            ISO 4217 currency code, e.g. "TZS", "USD", "KES".
+        order_id : str
+            Your internal order UUID. Included in the simulated response
+            for traceability — mirrors Stripe's metadata field.
 
-    Parameters
-    ----------
-    card_number : str
-        16-digit card number string. Last digit controls the outcome.
-    amount : int
-        Charge amount in the smallest currency unit
-        (e.g. 150000 for TZS 150,000 or 1500 for USD 15.00).
-    currency : str
-        ISO 4217 currency code, e.g. "TZS", "USD", "KES".
-    order_id : str
-        Your internal order UUID. Included in the simulated response
-        for traceability — mirrors Stripe's metadata field.
+        Returns
+        -------
+        dict with keys:
+            status           : "success" | "failed"
+            payment_intent_id: str (sim_pi_...) or None
+            amount_charged   : int or None
+            currency         : str or None
+            error_code       : str or None  (only when status == "failed")
+            retryable        : bool
 
-    Returns
-    -------
-    dict with keys:
-        status           : "success" | "failed"
-        payment_intent_id: str (sim_pi_...) or None
-        amount_charged   : int or None
-        currency         : str or None
-        error_code       : str or None  (only when status == "failed")
-        retryable        : bool
+        Raises
+        ------
+        RetryablePaymentError
+            When the gateway times out or has a network error.
+        NonRetryablePaymentError
+            Should not normally be raised — permanent failures are returned
+            as a failed result dict so callers can publish payment.failed
+            cleanly. Raised only for unexpected internal errors.
+        """
+        outcome = _CARD_OUTCOMES.get(card_number.strip()[-1], "success")
 
-    Raises
-    ------
-    RetryablePaymentError
-        When the gateway times out or has a network error.
-    NonRetryablePaymentError
-        Should not normally be raised — permanent failures are returned
-        as a failed result dict so callers can publish payment.failed
-        cleanly. Raised only for unexpected internal errors.
-    """
-    outcome = _CARD_OUTCOMES.get(card_number.strip()[-1], "success")
-
-    logger.info(
-        "payment_simulator.charge_card called",
-        extra={
-            "order_id": order_id,
-            "outcome": outcome,
-            "amount": amount,
-            "currency": currency,
-        },
-    )
-
-    # --- Retryable failures: raise so consumer NACKs ---
-    if outcome == "timeout":
-        logger.warning("payment_simulator: simulating gateway timeout", extra={"order_id": order_id})
-        time.sleep(_SIMULATED_TIMEOUT_DELAY)
-        raise RetryablePaymentError("Payment gateway did not respond within timeout")
-
-    if outcome == "network_error":
-        logger.warning("payment_simulator: simulating network error", extra={"order_id": order_id})
-        raise RetryablePaymentError("Could not reach payment gateway — network error")
-
-    # --- Non-retryable failures: return result dict so consumer can ACK ---
-    if outcome in _NON_RETRYABLE_FAILURES:
         logger.info(
-            "payment_simulator: non-retryable failure",
-            extra={"order_id": order_id, "error_code": outcome},
+            "payment_simulator.charge_card called",
+            extra={
+                "order_id": order_id,
+                "outcome": outcome,
+                "amount": amount,
+                "currency": currency,
+            },
+        )
+
+        # --- Retryable failures: raise so consumer NACKs ---
+        if outcome == "timeout":
+            logger.warning("payment_simulator: simulating gateway timeout", extra={"order_id": order_id})
+            time.sleep(_SIMULATED_TIMEOUT_DELAY)
+            raise RetryablePaymentError("Payment gateway did not respond within timeout")
+
+        if outcome == "network_error":
+            logger.warning("payment_simulator: simulating network error", extra={"order_id": order_id})
+            raise RetryablePaymentError("Could not reach payment gateway — network error")
+
+        # --- Non-retryable failures: return result dict so consumer can ACK ---
+        if outcome in _NON_RETRYABLE_FAILURES:
+            logger.info(
+                "payment_simulator: non-retryable failure",
+                extra={"order_id": order_id, "error_code": outcome},
+            )
+            return {
+                "status": "failed",
+                "payment_intent_id": None,
+                "amount_charged": None,
+                "currency": None,
+                "error_code": outcome,
+                "retryable": False,
+            }
+
+        # --- Success ---
+        time.sleep(_SIMULATED_LATENCY)  # realistic gateway delay
+        payment_intent_id = f"sim_pi_{uuid.uuid4().hex[:16]}"
+        logger.info(
+            "payment_simulator: charge successful",
+            extra={
+                "order_id": order_id,
+                "payment_intent_id": payment_intent_id,
+            },
         )
         return {
-            "status": "failed",
-            "payment_intent_id": None,
-            "amount_charged": None,
-            "currency": None,
-            "error_code": outcome,
+            "status": "success",
+            "payment_intent_id": payment_intent_id,
+            "amount_charged": amount,
+            "currency": currency,
+            "error_code": None,
             "retryable": False,
         }
 
-    # --- Success ---
-    time.sleep(_SIMULATED_LATENCY)  # realistic gateway delay
-    payment_intent_id = f"sim_pi_{uuid.uuid4().hex[:16]}"
-    logger.info(
-        "payment_simulator: charge successful",
-        extra={
-            "order_id": order_id,
-            "payment_intent_id": payment_intent_id,
-        },
-    )
-    return {
-        "status": "success",
-        "payment_intent_id": payment_intent_id,
-        "amount_charged": amount,
-        "currency": currency,
-        "error_code": None,
-        "retryable": False,
-    }
 
+    @staticmethod
+    def refund_payment(payment_intent_id: str, amount: int) -> dict:
+        """
+        Simulate refunding a previously successful charge.
 
-def refund_payment(payment_intent_id: str, amount: int) -> dict:
-    """
-    Simulate refunding a previously successful charge.
+        Parameters
+        ----------
+        payment_intent_id : str
+            The payment_intent_id from the original charge_card() response.
+        amount : int
+            Amount to refund in smallest currency unit.
+            Must be <= original charge amount.
 
-    Parameters
-    ----------
-    payment_intent_id : str
-        The payment_intent_id from the original charge_card() response.
-    amount : int
-        Amount to refund in smallest currency unit.
-        Must be <= original charge amount.
+        Returns
+        -------
+        dict with keys:
+            status    : "refunded"
+            refund_id : str (sim_re_...)
+            amount    : int
+        """
+        if not payment_intent_id or not payment_intent_id.startswith("sim_pi_"):
+            raise NonRetryablePaymentError(
+                f"Cannot refund: invalid payment_intent_id '{payment_intent_id}'"
+            )
 
-    Returns
-    -------
-    dict with keys:
-        status    : "refunded"
-        refund_id : str (sim_re_...)
-        amount    : int
-    """
-    if not payment_intent_id or not payment_intent_id.startswith("sim_pi_"):
-        raise NonRetryablePaymentError(
-            f"Cannot refund: invalid payment_intent_id '{payment_intent_id}'"
+        refund_id = f"sim_re_{uuid.uuid4().hex[:16]}"
+        logger.info(
+            "payment_simulator: refund issued",
+            extra={"payment_intent_id": payment_intent_id, "refund_id": refund_id, "amount": amount},
         )
-
-    refund_id = f"sim_re_{uuid.uuid4().hex[:16]}"
-    logger.info(
-        "payment_simulator: refund issued",
-        extra={"payment_intent_id": payment_intent_id, "refund_id": refund_id, "amount": amount},
-    )
-    return {
-        "status": "refunded",
-        "refund_id": refund_id,
-        "amount": amount,
-    }
+        return {
+            "status": "refunded",
+            "refund_id": refund_id,
+            "amount": amount,
+        }
 
 
-# ---------------------------------------------------------------------------
-# Test card reference (print this during development)
-# ---------------------------------------------------------------------------
+    # ---------------------------------------------------------------------------
+    # Test card reference (print this during development)
+    # ---------------------------------------------------------------------------
 
-TEST_CARDS = {
-    "4111111111110": "Always succeeds",
-    "4111111111111": "Card declined (non-retryable)",
-    "4111111111112": "Insufficient funds (non-retryable)",
-    "4111111111113": "Gateway timeout (retryable — triggers DLQ after 3 attempts)",
-    "4111111111114": "Gateway timeout (retryable)",
-    "4111111111117": "Network error (retryable)",
-    "4111111111119": "Fraud blocked (non-retryable)",
-}
+    
 
 
-def print_test_cards():
-    """Helper — call from a management command or shell to show test cards."""
-    print("\n=== Payment Simulator Test Cards ===")
-    for card, description in TEST_CARDS.items():
-        print(f"  {card}  →  {description}")
-    print()
+    def print_test_cards():
+        """Helper — call from a management command or shell to show test cards."""
+        print("\n=== Payment Simulator Test Cards ===")
+        for card, description in TEST_CARDS.items():
+            print(f"  {card}  →  {description}")
+        print()
