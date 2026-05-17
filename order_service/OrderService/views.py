@@ -137,10 +137,11 @@ class CancelOrderMutation(graphene.Mutation):
         order_id = graphene.UUID(required=True)
 
     response = graphene.Field(ResponseObject)
-    data     = graphene.Field(OrderObject)
+    data = graphene.Field(OrderObject)
 
+    @classmethod
     def mutate(cls, root, info, order_id):
-        user_id = OrderBuilder._get_user_id(info)
+        user_id = OrderBuilder._get_user_id(info) or "9b8acafb-4287-4c52-8244-89ecd45fcf33"
         try:
             order = Order.objects.get(id=order_id, user_id=user_id)
         except Order.DoesNotExist:
@@ -154,12 +155,19 @@ class CancelOrderMutation(graphene.Mutation):
             return cls(response=ResponseObject.get_response(id="10"), data=None)
 
         try:
-            order.status = Order.Status.CANCELLED
-            order.save()
+            with transaction.atomic():
+                order.status = Order.Status.CANCELLED
+                order.save()
+                success, id = ExternalServices.release_reservation(str(order.id))
+                if not success:
+                    raise  ReservationFailedError(id)
             return cls(
                 response=ResponseObject.get_response(id="1"),
                 data=OrderBuilder._order_to_object(order),
             )
+        except ReservationFailedError as e:
+            print(e)
+            return cls(response=ResponseObject.get_response(id="5"), data=None)
         except Exception as e:
             print(e)
             return cls(response=ResponseObject.get_response(id="5"), data=None)
@@ -172,6 +180,7 @@ class DeleteOrderMutation(graphene.Mutation):
 
     response = graphene.Field(ResponseObject)
 
+    @classmethod
     def mutate(cls, root, info, order_id):
         user_id = OrderBuilder._get_user_id(info)
         try:

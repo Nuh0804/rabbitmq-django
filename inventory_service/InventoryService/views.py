@@ -378,6 +378,7 @@ class ReleaseReservationMutation(graphene.Mutation):
     response = graphene.Field(ResponseObject)
     data = graphene.Field(StockReservationObject)
 
+    @classmethod
     def mutate(cls, root, info, order_id):
         try:
             reservation = StockReservation.objects.prefetch_related("items").get(
@@ -401,7 +402,7 @@ class ReleaseReservationMutation(graphene.Mutation):
                         stock.reserved  -= item.quantity
                         stock.save()
 
-                reservation.status      = StockReservation.Status.RELEASED
+                reservation.status = StockReservation.Status.RELEASED
                 reservation.released_at = timezone.now()
                 reservation.save()
 

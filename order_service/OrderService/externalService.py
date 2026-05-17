@@ -46,3 +46,48 @@ class ExternalServices:
             return False, None
         except Exception as e:
             return False, None
+        
+    
+    @staticmethod
+    def release_reservation(order_id):
+        query = """
+            mutation releaseReservation($orderId: UUID!) {
+                releaseReservation(orderId: $orderId) {
+                    response {
+                        status
+                        message
+                        id
+                    }
+                    data {
+                        orderId
+                        reservedAt
+                        id
+                    }
+                }
+            }
+        """
+        variables = {"orderId": order_id}
+        print(variables)
+
+        try:
+            response = requests.post(
+                inventory_url,
+                json={"query": query, "variables": variables},
+                headers={"Content-Type": "application/json"}
+            )
+            print(response.json())
+            response = response.json().get("data", {}).get("releaseReservation", {}).get("response", {})
+            print(response)
+            status = response.get("status")
+            id = response.get("id")
+            return status, id
+        except requests.exceptions.HTTPError as errh:
+            print(f"Http Error: {errh}")
+            return False, None
+        except requests.exceptions.ConnectionError as errc:
+            print(f"Error Connecting: {errc}")
+            return False, None
+        except Exception as e:
+            print(e)
+            return False, None
+        
