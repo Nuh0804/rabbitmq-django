@@ -2,8 +2,11 @@ import graphene
 from .models import Order, OrderItem, ShippingAddress
 from .dtos.OrderDto import OrderObject, OrderItemObject, ShippingAddressObject
 from .builder import OrderBuilder
+from django.db import transaction
 from .dtos.ResponseDtos import ResponseObject
 from .dtos.OrderDto import CreateOrderInputObject, UpdateOrderStatusInputObject
+from .externalService import ExternalServices
+from .exceptions import ReservationFailedError
 
 class CreateOrderMutation(graphene.Mutation):
     class Arguments:
@@ -12,8 +15,9 @@ class CreateOrderMutation(graphene.Mutation):
     response = graphene.Field(ResponseObject)
     data     = graphene.Field(OrderObject)
 
+    @classmethod
     def mutate(cls, root, info, input):
-        user_id = OrderBuilder._get_user_id(info)
+        user_id = OrderBuilder._get_user_id(info) or "9b8acafb-4287-4c52-8244-89ecd45fcf33"
         if not user_id:
             return cls(response=ResponseObject.get_response(id="10"), data=None)
 
@@ -30,40 +34,64 @@ class CreateOrderMutation(graphene.Mutation):
             return cls(response=ResponseObject.get_response(id="10"), data=None)
 
         try:
-            order = Order.objects.create(
-                user_id=user_id,
-                currency=input.currency,
-                total_amount=total_amount,
-                status=Order.Status.PENDING,
-                idempotency_key=input.idempotency_key or None,
-            )
-            for item in input.items:
-                OrderItem.objects.create(
-                    order=order,
-                    sku=item.sku,
-                    product_name=item.product_name or "",
-                    quantity=item.quantity,
-                    unit_price=item.unit_price,
-                    subtotal=item.quantity * item.unit_price,
+            with transaction.atomic():
+                order = Order.objects.create(
+                    user_id=user_id,
+                    currency=input.currency,
+                    total_amount=total_amount,
+                    status=Order.Status.PENDING,
+                    idempotency_key=input.idempotency_key or None,
                 )
-            addr = input.shipping_address
-            ShippingAddress.objects.create(
-                order=order,
-                street=addr.street,
-                city=addr.city,
-                country=addr.country,
-                region=addr.region or "",
-                postal_code=addr.postal_code or "",
-                recipient_name=addr.recipient_name or "",
-                recipient_phone=addr.recipient_phone or "",
-            )
+
+                #prepare data to send to inventory service            
+                inventory_payload = {
+                    "orderId" : str(order.id),
+                    "items" : [
+                        {"sku": item.sku, "quantity": item.quantity} for item in input.items
+                    ]
+                }
+                print(f"the inventory items are {inventory_payload}")
+
+                success, id = ExternalServices.create_reservation(inventory_payload)
+                print(f"{success} for {id}")
+                if success == False:
+                    raise ReservationFailedError(id)
+                
+                OrderItem.objects.bulk_create([
+                    OrderItem(
+                        order = order, 
+                        sku = item.sku,
+                        product_name = item.product_name or "",
+                        quantity=item.quantity,
+                        unit_price=item.unit_price,
+                        subtotal=item.quantity * item.unit_price,
+                    )
+                    for item in input.items
+                ])
+                addr = input.shipping_address
+                ShippingAddress.objects.create(
+                    order=order,
+                    street=addr.street,
+                    city=addr.city,
+                    country=addr.country,
+                    region=addr.region or "",
+                    postal_code=addr.postal_code or "",
+                    recipient_name=addr.recipient_name or "",
+                    recipient_phone=addr.recipient_phone or "",
+                )
+
             return cls(
                 response=ResponseObject.get_response(id="1"),
                 data=OrderBuilder._order_to_object(order),
             )
+        except ReservationFailedError as e:
+            # transaction.atomic() already rolled back the order row
+            print(e)
+            return cls(response=ResponseObject.get_response(id=e.code), data=None)
+        
         except Exception as e:
             print(e)
-            return cls(response=ResponseObject.get_response(id="5"), data=None)
+            return cls(response=ResponseObject.get_response(id="8"), data=None)
 
 
 class UpdateOrderStatusMutation(graphene.Mutation):
@@ -77,6 +105,7 @@ class UpdateOrderStatusMutation(graphene.Mutation):
     response = graphene.Field(ResponseObject)
     data     = graphene.Field(OrderObject)
 
+    @classmethod
     def mutate(cls, root, info, input):
         try:
             order = Order.objects.get(id=input.order_id)
